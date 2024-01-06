@@ -2,7 +2,7 @@ var Counter = Counter || (function () {
     'use strict';
 
     var version = '0.0.1',
-        lastUpdate = 1487162501,
+        lastUpdate = 1704566167,
         schemaVersion = 0.2,
         counters,
         observers = {

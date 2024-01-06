@@ -1,11 +1,13 @@
 var CounterTokens = CounterTokens || (function () {
   'use strict'
   const version = '0.0.1'
-  const lastUpdate = 1488056728
+  const lastUpdate = 1704566167
   const schemaVersion = 0.3
   let tokenStore = {}
   let tokens = {}
   let debug = false
+  let updateStates = {}
+  let updateTimers = {}
 
   const checkInstall = () => {
     log('-=> CounterTokens v' + version + ' <=-  [' + (new Date(lastUpdate * 1000)) + ']')
@@ -20,6 +22,7 @@ var CounterTokens = CounterTokens || (function () {
           tokens: {}
         }
       }
+
       if (state.CounterTokens.version < 0.3) {
         state.CounterTokens.debug = false
         state.CounterTokens.version = 0.3
@@ -67,10 +70,10 @@ var CounterTokens = CounterTokens || (function () {
       imgIds: [],
       top: 30,
       left: 30,
-      width: 30,
-      height: 30,
-      spaceX: 30,
-      spaceY: 30
+      width: 20,
+      height: 20,
+      spaceX: 25,
+      spaceY: 25
     }
     attachTokenToCounter(tokenStore[tokenName])
 
@@ -342,7 +345,33 @@ var CounterTokens = CounterTokens || (function () {
       (numOnRow >= 10 || numOnRow >= 5 && numOnRow + remainingItems < 10) ?
         [startLeft, currentTop + spaceBottom] : [currentLeft + spaceRight, currentTop]
 
+    const debounce = (key, func, wait) => {
+      const timeout = updateTimers[key]
+      if (timeout) {
+        if (debug) {
+          log(`Clearing existing timer for ${key}`)
+        }
+        clearTimeout(timeout)
+      }
+      updateTimers[key] = setTimeout(() => {
+        updateTimers[key] = false
+        func()
+      }, wait)
+    }
+
     const rearrangeImages = (graphicRefs, startLeft, startTop, spaceRight, spaceBottom) => {
+      const graphicRefsId = graphicRefs[0].get('id')
+      if (updateStates[graphicRefsId]) {
+        debounce(graphicRefsId, () => {
+          if (debug) {
+            log(`Rearranging images for ${graphicRefsId} after delay.`)
+          }
+          rearrangeImages(graphicRefs, startLeft, startTop, spaceRight, spaceBottom)
+        }, 1000)
+      }
+
+      updateStates[graphicRefsId] = true
+
       if (debug) {
         log("Rearranging images  with startLeft: " + startLeft + ", startTop: " + startTop + ", spaceRight: " + spaceRight + ", spaceBottom: " + spaceBottom)
         log("Image refs: ")
@@ -377,6 +406,7 @@ var CounterTokens = CounterTokens || (function () {
           numOnRow: (left === startLeft ? 1 : acc.numOnRow + 1),
         }
       }, { left: startLeft, top: startTop, remainingItems: graphicRefs.length, numOnRow: 0 })
+      updateStates[graphicRefsId] = false
     }
 
     const normalizeObjKeys = (obj) => {
@@ -501,7 +531,7 @@ var CounterTokens = CounterTokens || (function () {
 
     const clearImages = (graphicRefs, token) => {
       token.imgIds = []
-      _.each(graphicRef, function (obj) {
+      _.each(graphicRefs, function (obj) {
         obj.remove()
       })
     }
