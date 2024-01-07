@@ -2,8 +2,8 @@ var CounterTokens = CounterTokens || (function () {
   'use strict'
   const version = '0.0.1'
   const lastUpdate = 1704566167
-  const schemaVersion = 0.3
-  let tokenStore = {}
+  const schemaVersion = 0.5
+  let persistentTokens = {}
   let tokens = {}
   let debug = false
   let updateStates = {}
@@ -12,11 +12,11 @@ var CounterTokens = CounterTokens || (function () {
   const checkInstall = () => {
     log('-=> CounterTokens v' + version + ' <=-  [' + (new Date(lastUpdate * 1000)) + ']')
     if (!_.has(state, 'CounterTokens') || state.CounterTokens.version === undefined || state.CounterTokens.version < schemaVersion) {
-      log('  > Updating Schema to v' + schemaVersion + ' <')
 
       if (!_.has(state, 'CounterTokens')
         || state.CounterTokens.version === undefined
         || state.CounterTokens.version < 0.1) {
+        log('  > Updating CounterTokens Schema to v0.1 < ')
         state.CounterTokens = {
           version: 0.1,
           tokens: {}
@@ -24,25 +24,67 @@ var CounterTokens = CounterTokens || (function () {
       }
 
       if (state.CounterTokens.version < 0.3) {
+        log('  > Updating CounterTokens Schema to v0.3 < ')
         state.CounterTokens.debug = false
         state.CounterTokens.version = 0.3
       }
+
+      if (state.CounterTokens.version < 0.4) {
+        log('  > Updating CounterTokens Schema to v0.4 < ')
+        const pageId = Campaign().get('playerpageid')
+        if (_.some(state.CounterTokens.tokens, (token) => token.imgIds?.length)) {
+          state.CounterTokens.tokens = _.reduce(state.CounterTokens.tokens, (acc, token) => {
+            if (!token.imgIds?.length) {
+              return { ...acc, [token.tokenName]: token }
+            }
+            const newToken = JSON.parse(JSON.stringify(token))
+            const existingImgIds = token.imgIds || []
+            newToken.imgIds = {}
+            newToken.imgIds[pageId] = existingImgIds
+            acc[newToken.tokenName] = newToken
+            return { ...acc, [newToken.tokenName]: newToken }
+          }, {})
+        }
+        state.CounterTokens.version = 0.4
+      }
+
+      if (state.CounterTokens.version < 0.5) {
+        log('  > Updating CounterTokens Schema to v0.5 < ')
+        const pageIds = PageWatcher.GetAllPagesWithPlayers()
+        state.CounterTokens.tokens = _.reduce(state.CounterTokens.tokens, (acc, token) => ({
+          ...acc,
+          tokenName: {
+            ...token,
+            imgIds: token.imgIds ??
+              _.reduce(pageIds, (acc, pageId) => ({ ...acc, [pageId]: [] }), {})
+          }
+        }), {})
+        state.CounterTokens.version = 0.5
+      }
     }
 
-    tokenStore = state.CounterTokens.tokens
+    log('-=>Counter Tokens schema version: [' + state.CounterTokens.version + ']<=-')
+
+    persistentTokens = state.CounterTokens.tokens
     debug = state.CounterTokens.debug
 
     if (debug) {
       log("Debugging enabled.  Disable with !counter-tokens.debug-off")
       log("Token store: ")
-      log(tokenStore)
+      log(persistentTokens)
     }
 
-    _.each(tokenStore, (tokenRef) => {
-      if (debug) {
-        log("Reattaching token: " + tokenRef.tokenName + " to counter: " + tokenRef.counterName)
+    _.each(persistentTokens, (persistentToken) => {
+
+      if (!Object.hasOwnProperty(persistentToken, 'imgIds')) {
+        persistentToken.imgIds = {}
       }
-      attachTokenToCounter(tokenRef)
+
+      if (debug) {
+        log("Reattaching token: " + persistentToken.tokenName + " to counter: " + persistentToken.counterName)
+
+      }
+      attachTokenToCounterForAllPages(persistentToken)
     })
   }
 
@@ -59,26 +101,37 @@ var CounterTokens = CounterTokens || (function () {
     } else if (!imgSrc) {
       throw new Error("imgSrc is required.")
     }
+
+    if (_.length(findObjs({ type: 'graphic', 'imgsrc': imgSrc })) <= 0) {
+      throw new Error("imgSrc must refer to an image in your library.  You supplied " + imgSrc)
+    }
+
     if (debug) {
       log("Creating token: " + tokenName + " for counter: " + counterName + " with imgSrc: " + imgSrc)
     }
 
-    tokenStore[tokenName] = {
+    const pageIds = PageWatcher.GetAllPagesWithPlayers()
+
+    persistentTokens[tokenName] = {
       tokenName: tokenName,
       counterName: counterName,
-      imgSrc: getCleanImgsrc(imgSrc),
-      imgIds: [],
+      imgSrc: getCleanImgSrc(imgSrc),
+      imgIds: pageIds.reduce((acc, pageId) => {
+        acc[pageId] = []
+        return acc
+      }, {}),
       top: 30,
       left: 30,
       width: 20,
       height: 20,
       spaceX: 25,
-      spaceY: 25
+      spaceY: 25,
     }
-    attachTokenToCounter(tokenStore[tokenName])
+
+    attachTokenToCounterForAllPages(persistentTokens[tokenName])
 
     if (debug) {
-      log("Token created successfully:", tokenStore[tokenName])
+      log("Token created successfully:", persistentTokens[tokenName])
     }
   }
 
@@ -99,22 +152,53 @@ var CounterTokens = CounterTokens || (function () {
   }
 
   const listTokens = () => {
-    if (tokenStore.length <= 0) {
+    if (persistentTokens.length <= 0) {
       return "No counter tokens attached to this game"
     }
-    return "<ul>" + _.reduce(tokenStore,
+    return "<ul>" + _.reduce(persistentTokens,
       function (acc, token, name) {
         return acc + "<li>" + name + " -> " + token.counterName + "</li>"
       }, "") + "</ul>"
   }
 
-  const attachTokenToCounter = (tokenRef) => {
-    const tokenName = tokenRef.tokenName
-    tokens[tokenName] = CounterToken.create(tokenRef)
+  const attachTokenToCounterForAllPages = (persistentToken) => {
+    if (debug) {
+      log("Attaching token to counter for all pages: ")
+      log(persistentToken)
+    }
+    const pageIds = PageWatcher.GetAllPagesWithPlayers()
+    if (debug) {
+      log("Found pages: ")
+      log(pageIds)
+    }
+    const tokenName = persistentToken.tokenName
+    if (debug) {
+      log("Found player pages: ")
+      log(pageIds)
+    }
+    _.each(pageIds, (pageId) => attachTokenToCounter(persistentToken, pageId))
+    tokens[tokenName].counterRemoveHandler = _.partial(onCounterRemove, tokenName)
+    Counter.ObserveCounterRemove(tokens[tokenName].counterRemoveHandler)
+  }
 
-    const tokenToAttach = tokens[tokenName]
-    Counter.ObserveCounterChange(tokenToAttach.onCounterChange)
-    Counter.ObserveCounterRemove(_.partial(onCounterRemove, tokenName))
+  const attachTokenToCounter = (persistentToken, pageId) => {
+    if (debug) {
+      log("Attaching token to counter for page: ")
+      log(pageId)
+      log(persistentToken)
+    }
+    const tokenName = persistentToken.tokenName
+    if (!tokens.hasOwnProperty(tokenName)) {
+      tokens[tokenName] = {}
+    }
+    tokens[tokenName][pageId] = CounterToken.create(persistentToken, pageId)
+    if (debug) {
+      log("Attaching token to in memory storage for page: ")
+      log(pageId)
+      log(persistentToken)
+    }
+    const tokenForCallback = tokens[tokenName][pageId]
+    Counter.ObserveCounterChange(tokenForCallback.onCounterChange)
   }
 
   const onCounterRemove = function (tokenName, counterName) {
@@ -125,13 +209,28 @@ var CounterTokens = CounterTokens || (function () {
   }
 
   const removeToken = function (tokenName) {
-    if (!tokenStore.hasOwnProperty(tokenName)) {
+    if (!persistentTokens.hasOwnProperty(tokenName)) {
       throw new Error(tokenName + " is not attached to this game.")
     }
-    Counter.IgnoreCounterChange(tokens[tokenName])
-    tokens[tokenName].clearImages()
+
+    if (tokens[tokenName].counterRemoveHandler) {
+      Counter.IgnoreCounterRemove(tokens[tokenName].counterRemoveHandler)
+    }
+
+    Object.entries(tokens[tokenName])
+      .filter(([pageId, _]) => pageId != 'counterRemoveHandler')
+      .forEach(([pageId, pageToken]) => {
+        if (debug) {
+          log("Removing token from page: " + pageId)
+          log(pageToken)
+        }
+
+        Counter.IgnoreCounterChange(pageToken.onCounterChange)
+        pageToken.onClearImages(pageId)
+      })
+
     delete tokens[tokenName]
-    delete tokenStore[tokenName]
+    delete persistentTokens[tokenName]
   }
 
   const enableDebug = () => {
@@ -210,7 +309,7 @@ var CounterTokens = CounterTokens || (function () {
           reset()
           break
         case '!counter-tokens.debug':
-          log({ tokenStore, tokens })
+          log({ persistentTokens, tokens })
           logToChat(msg.who, "Debug info sent to console.")
           break
         case '!counter-tokens.debug-on':
@@ -234,7 +333,7 @@ var CounterTokens = CounterTokens || (function () {
     on('chat:message', handleInput)
   }
 
-  const getCleanImgsrc = (imgsrc) => {
+  const getCleanImgSrc = (imgsrc) => {
     const parts = imgsrc.match(/(.*\/images\/.*)(thumb|med|original|max)(.*)$/)
     if (parts) {
       return parts[1] + 'thumb' + parts[3]
@@ -360,6 +459,20 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     const rearrangeImages = (graphicRefs, startLeft, startTop, spaceRight, spaceBottom) => {
+      if (debug) {
+        log("Rearranging images")
+        log("Image refs: ")
+        log(graphicRefs)
+      }
+
+      if (graphicRefs.length <= 0) {
+        if (debug) {
+          log("No images to rearrange.")
+        }
+
+        return
+      }
+
       const graphicRefsId = graphicRefs[0].get('id')
       if (updateStates[graphicRefsId]) {
         debounce(graphicRefsId, () => {
@@ -439,6 +552,17 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     const keepImagesTogether = (graphicRefs, token, obj, prev) => {
+      if (debug) {
+        log("Keeping images together for token: " + token.tokenName)
+        log("Graphic refs: ")
+        log(graphicRefs)
+        log("Token: ")
+        log(token)
+        log("Object: ")
+        log(obj)
+        log("Previous: ")
+        log(prev)
+      }
 
       if (
         (obj.get('left') === prev.left && obj.get('top') === prev.top)
@@ -456,23 +580,57 @@ var CounterTokens = CounterTokens || (function () {
       rearrangeImages(graphicRefs, left, top, token.spaceX, token.spaceY)
     }
 
-    const removeTokenImages = (graphicRefs, token, numberToRemove) => {
-      const numberToKeep = token.imgIds.length - numberToRemove - 1
-      _.map(_.range(token.imgIds.length - 1, numberToKeep, -1), (function (i) {
-        const idx = findGraphicRefIndexByImgId(graphicRefs, token.imgIds[i]),
-          img = graphicRefs[idx]
-        token.imgIds.splice(i)
+    const removeTokenImages = (graphicRefs, token, pageId, numberToRemove) => {
+      if (debug) {
+        log("Removing " + numberToRemove + " images from token: " + token.tokenName)
+      }
+      const tokenImgIds = token.imgIds[pageId]
+      const numberToKeep = tokenImgIds.length - numberToRemove - 1
+      _.each(_.range(tokenImgIds.length - 1, numberToKeep, -1), (function (i) {
+        const idx = findGraphicRefIndexByImgId(graphicRefs, tokenImgIds[i])
+        if (debug) {
+          log("Removing image: " + tokenImgIds[i] + " from token: " + token.tokenName)
+        }
+        const img = graphicRefs[idx]
+        tokenImgIds.splice(i)
         graphicRefs.splice(idx)
-        img.remove()
+
+        if (debug) {
+          log("Removing image: ")
+          log(img)
+        }
+        if (img) {
+          img.remove()
+        }
       }))
     }
 
-    const addTokenImages = (graphicRefs, token, numberToAdd) => {
-      const pageId = Campaign().get("playerpageid")
-      const startValue = (token.imgIds.length > 0 ? token.imgIds.length : 0)
+    const addTokenImages = (graphicRefs, token, pageId, numberToAdd) => {
+      const startValue = token.imgIds[pageId]?.length || 0
+
+      if (debug) {
+        log(`Adding ${numberToAdd} images to token ${token.tokenName} on page ${pageId} starting at ${startValue}`)
+      }
+
       _.each(_.range(startValue, startValue + numberToAdd), function (i) {
+        const existingImage = findObjs({ type: 'graphic', name: token.tokenName + ' ' + i, pageid: pageId })
+
+        if (debug) {
+          log("Existing images for index " + i + ": ")
+          log(existingImage)
+          log("These will be replaced with fresh images")
+        }
+
         const left = token.left
         const top = token.top
+        _.each(existingImage, (img) => {
+          if (debug) {
+            log("Removing existing image: ")
+            log(img)
+          }
+          img.remove()
+        })
+
         const img = createObj('graphic', {
           name: token.tokenName + ' ' + i,
           pageid: pageId,
@@ -484,64 +642,103 @@ var CounterTokens = CounterTokens || (function () {
           height: token.height,
           isdrawing: true
         })
+
+        if (debug) {
+          log("Created image: ")
+          log(img)
+        }
         graphicRefs.push(img)
-        token.imgIds.push(img.id)
+        //Just in case the token has been removed from the page, we need to add it back to the token store.
+        token.imgIds[pageId] = token.imgIds[pageId] || []
+        token.imgIds[pageId].push(img.id)
         toFront(img)
       })
     }
 
-    const updateImages = (graphicRefs, token, counterValue) => {
+    const updateImages = (graphicRefs, token, pageId, counterValue) => {
+      if (debug) {
+        log(`Updating images for token ${token.tokenName} on page ${pageId} with counter value ${counterValue}`)
+        log("Graphic refs: ")
+        log(graphicRefs)
+        log("Existing token image IDs: ")
+        log(token.imgIds[pageId])
+      }
       const graphicCount = graphicRefs.length
+
       if (counterValue < graphicCount) {
-        removeTokenImages(graphicRefs, token, token.imgIds.length - counterValue)
+        if (debug) {
+          log("Removing " + (graphicCount - counterValue) + " images from token: " + token.tokenName)
+        }
+        removeTokenImages(graphicRefs, token, pageId, token.imgIds[pageId].length - counterValue)
       } else if (counterValue > graphicCount) {
-        addTokenImages(graphicRefs, token, counterValue - token.imgIds.length)
+        if (debug) {
+          log("Adding " + (counterValue - graphicCount) + " images to token: " + token.tokenName)
+        }
+        addTokenImages(graphicRefs, token, pageId, counterValue - token.imgIds[pageId].length)
       }
       rearrangeImages(graphicRefs, token.left, token.top, token.spaceX, token.spaceY)
     }
 
     //Bind each reference of on-page graphical objects to the supplied variable
-    const getGraphicReferences = (token) => {
-      const pageId = Campaign().get('playerpageid');
-      const graphics = filterObjs(obj =>
-        obj.get('type') === 'graphic'
-        && obj.get('pageid') === pageId
-        && _.contains(token.imgIds, obj.get('id'))
-      )
+    const getExistingGraphicReferences = (token, pageId) => {
+      const graphics = findObjs({
+        _type: 'graphic',
+        _pageid: pageId
+      }).filter(o => _.contains(token.imgIds[pageId], o.get('id')))
 
       //Remove all imgIds from token for images that that haven't been found on the page.
       _.each(
-        _.difference(token.imgIds, _.map(graphics, (g) => g.get('id'))),
-        (imgId) => token.imgIds.splice(_.indexOf(token.imgIds, imgId))
+        _.difference(token.imgIds[pageId], _.map(graphics, (g) => g.get('id'))),
+        (imgId) => token.imgIds[pageId].splice(_.indexOf(token.imgIds[pageId], imgId))
       )
 
       return graphics
     }
 
-    const onCounterChange = (graphicRefs, token, counterName, counter) => {
+    const onCounterChange = (graphicRefs, token, pageId, counterName, counter) => {
       if (counterName !== token.counterName) {
         return
       }
+      if (debug) {
+        log("Counter changed for token: " + token.tokenName + " on page: " + pageId + " to value: " + counter.current + "from value: " + counter.prev)
+      }
+
       try {
-        updateImages(graphicRefs, token, counter.current, counter.max)
+        updateImages(graphicRefs, token, pageId, counter.current)
       } catch (err) {
         logToChat('gm', "Unable to update Counter Token images: " + err.message)
       }
     }
 
-    const clearImages = (graphicRefs, token) => {
-      token.imgIds = []
+    const clearImages = (graphicRefs, token, pageId) => {
+      token.imgIds[pageId] = []
       _.each(graphicRefs, function (obj) {
         obj.remove()
       })
     }
 
-    const create = (token) => {
-      const graphicRefs = getGraphicReferences(token)
-      on('change:graphic', _.partial(keepImagesTogether, graphicRefs, token))
+    const create = (token, pageId) => {
+      if (debug) {
+        log("Creating CounterToken on page " + pageId + " for token: ")
+        log(token)
+      }
+
+      if (!Object.hasOwnProperty(token.imgIds, pageId)) {
+        token.imgIds[pageId] = []
+      }
+
+      //Get all graphical objects on the page that match the token name
+      const graphicRefs = getExistingGraphicReferences(token, pageId)
+
+      const graphicsChangeHandler = _.partial(keepImagesTogether, graphicRefs, token)
+      const counterChangeHandler = _.partial(onCounterChange, graphicRefs, token, pageId)
+      const clearImageHandler = _.partial(clearImages, graphicRefs, token, pageId)
+
+      on('change:graphic', graphicsChangeHandler)
+
       return {
-        onCounterChange: _.partial(onCounterChange, graphicRefs, token),
-        clearImages: _.partial(clearImages, graphicRefs, token)
+        onCounterChange: counterChangeHandler,
+        onClearImages: clearImageHandler
       }
     }
 
@@ -559,14 +756,23 @@ var CounterTokens = CounterTokens || (function () {
 on('ready', function () {
   'use strict'
   let tries = 0
-  const intId = setInterval(() => {
+  const counterIntId = setInterval(() => {
     if (undefined !== Counter && undefined !== Counter.ObserveCounterChange) {
       CounterTokens.checkInstall()
       CounterTokens.registerEventHandlers()
-      clearInterval(intId)
+      clearInterval(counterIntId)
     } else if (tries++ > 20) {
-      clearInterval(intId)
+      clearInterval(counterIntId)
       throw new Error("Unable to find state.Counter.ObserveCounterChange, have you installed Counter?")
+    }
+  }, 200)
+
+  const pageWatchIntId = setInterval(() => {
+    if (undefined !== PageWatcher) {
+      clearInterval(pageWatchIntId)
+    } else if (tries++ > 20) {
+      clearInterval(pageWatchIntId)
+      throw new Error("Unable to find state.PageWatcher.ObservePageAddPlayer, have you installed PageWatcher?")
     }
   }, 200)
 })
