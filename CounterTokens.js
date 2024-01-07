@@ -8,6 +8,7 @@ var CounterTokens = CounterTokens || (function () {
   let debug = false
   let updateStates = {}
   let updateTimers = {}
+  let counterRemoveHandlers = {}
 
   const checkInstall = () => {
     log('-=> CounterTokens v' + version + ' <=-  [' + (new Date(lastUpdate * 1000)) + ']')
@@ -75,11 +76,6 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     _.each(persistentTokens, (persistentToken) => {
-
-      if (!Object.hasOwnProperty(persistentToken, 'imgIds')) {
-        persistentToken.imgIds = {}
-      }
-
       if (debug) {
         log("Reattaching token: " + persistentToken.tokenName + " to counter: " + persistentToken.counterName)
 
@@ -177,8 +173,8 @@ var CounterTokens = CounterTokens || (function () {
       log(pageIds)
     }
     _.each(pageIds, (pageId) => attachTokenToCounter(persistentToken, pageId))
-    tokens[tokenName].counterRemoveHandler = _.partial(onCounterRemove, tokenName)
-    Counter.ObserveCounterRemove(tokens[tokenName].counterRemoveHandler)
+    counterRemoveHandlers[tokenName] = _.partial(onCounterRemove, tokenName)
+    Counter.ObserveCounterRemove(counterRemoveHandlers[tokenName])
   }
 
   const attachTokenToCounter = (persistentToken, pageId) => {
@@ -188,7 +184,7 @@ var CounterTokens = CounterTokens || (function () {
       log(persistentToken)
     }
     const tokenName = persistentToken.tokenName
-    if (!tokens.hasOwnProperty(tokenName)) {
+    if (!(tokenName in tokens)) {
       tokens[tokenName] = {}
     }
     tokens[tokenName][pageId] = CounterToken.create(persistentToken, pageId)
@@ -201,6 +197,67 @@ var CounterTokens = CounterTokens || (function () {
     Counter.ObserveCounterChange(tokenForCallback.onCounterChange)
   }
 
+  const detachTokenFromCounter = (token, pageId) => {
+    if (debug) {
+      log("Detaching token for page: ")
+      log(pageId)
+      log(persistentTokens)
+    }
+    const tokenName = token.tokenName
+    if (!(tokenName in tokens)) {
+      if (debug) {
+        log("Token not attached to counter, skipping.")
+      }
+      return
+    }
+
+    if (!(pageId in tokens[tokenName])) {
+      if (debug) {
+        log("Token not attached to counter for page, skipping.")
+      }
+      return
+    }
+
+    const tokenForCallback = tokens[tokenName][pageId]
+    if ('onCounterChange' in (tokenForCallback)) {
+      Counter.IgnoreCounterChange(tokenForCallback.onCounterChange)
+    }
+    if ('onClearImages' in tokenForCallback && _.isFunction(tokenForCallback.onClearImages)) {
+      tokenForCallback.onClearImages(pageId)
+    }
+  }
+
+  const onPageFirstPlayer = (pageId) => {
+    if (debug) {
+      log("Page first joined: " + pageId)
+      log("Attaching tokens to counter for page: " + pageId)
+    }
+
+    _.each(persistentTokens, (persistentToken) => attachTokenToCounter(persistentToken, pageId))
+  }
+
+  const onPageNoPlayersRemaining = (pageId) => {
+    if (debug) {
+      log("Page players left: " + pageId)
+      log("Detaching tokens from counter for page: " + pageId)
+      log("Persistent tokens:")
+      log(persistentTokens)
+      log("In memory tokens:")
+      log(tokens)
+    }
+
+    _.each(persistentTokens, (persistentToken) => {
+      if (debug) {
+        log("Detaching token: " + persistentToken.tokenName)
+        log(persistentToken)
+      }
+      const tokenName = persistentToken.tokenName
+      detachTokenFromCounter(persistentToken, pageId)
+      delete tokens[tokenName][pageId]
+      delete persistentToken.imgIds[pageId]
+    })
+  }
+
   const onCounterRemove = function (tokenName, counterName) {
     if (tokenName != counterName) {
       return
@@ -209,16 +266,15 @@ var CounterTokens = CounterTokens || (function () {
   }
 
   const removeToken = function (tokenName) {
-    if (!persistentTokens.hasOwnProperty(tokenName)) {
+    if (!(tokenName in persistentTokens)) {
       throw new Error(tokenName + " is not attached to this game.")
     }
 
-    if (tokens[tokenName].counterRemoveHandler) {
-      Counter.IgnoreCounterRemove(tokens[tokenName].counterRemoveHandler)
+    if (counterRemoveHandlers[tokenName]) {
+      Counter.IgnoreCounterRemove(counterRemoveHandlers[tokenName])
     }
 
     Object.entries(tokens[tokenName])
-      .filter(([pageId, _]) => pageId != 'counterRemoveHandler')
       .forEach(([pageId, pageToken]) => {
         if (debug) {
           log("Removing token from page: " + pageId)
@@ -330,7 +386,21 @@ var CounterTokens = CounterTokens || (function () {
   }
 
   const registerEventHandlers = () => {
+    if (debug) {
+      log("Registering event handlers")
+    }
     on('chat:message', handleInput)
+    if (debug) {
+      log("Registered chat watcher event handler")
+    }
+    PageWatcher.ObservePageFirstPlayer(onPageFirstPlayer)
+    if (debug) {
+      log("Registered first player joining page event handler")
+    }
+    PageWatcher.ObservePageNoPlayers(onPageNoPlayersRemaining)
+    if (debug) {
+      log("Registered last player leaving page event handler")
+    }
   }
 
   const getCleanImgSrc = (imgsrc) => {
@@ -711,10 +781,10 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     const clearImages = (graphicRefs, token, pageId) => {
-      token.imgIds[pageId] = []
       _.each(graphicRefs, function (obj) {
         obj.remove()
       })
+      token.imgIds[pageId] = []
     }
 
     const create = (token, pageId) => {
@@ -723,7 +793,14 @@ var CounterTokens = CounterTokens || (function () {
         log(token)
       }
 
-      if (!Object.hasOwnProperty(token.imgIds, pageId)) {
+      if (!('imgIds' in token)) {
+        if (debug) {
+          log("No imgIds found for token, this should be impossible!!.  Gracefully recovering but another bug is likely present.")
+          token.imgIds = {}
+        }
+      }
+
+      if (!(pageId in token.imgIds) || !_.isArray(token.imgIds[pageId])) {
         token.imgIds[pageId] = []
       }
 

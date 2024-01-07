@@ -43,7 +43,7 @@ var Counter = Counter || (function () {
             throw new Error('Unable to create new counter.  You must specify a positive integer for the initial value that is less than or equal to maxValue');
         }
 
-        if (counters.hasOwnProperty(name)) {
+        if (name in counters) {
             throw new Error('Unable to create counter.  ' + name + ' already exists with an current and max value of ' + counters[name].current + '/' + counters[name].max);
         }
 
@@ -127,7 +127,7 @@ var Counter = Counter || (function () {
     getCounter = function (name) {
         if (!name) {
             throw new Error("Cannot get counter.  Please provide counter name");
-        } else if (!counters.hasOwnProperty(name)) {
+        } else if (!(name in counters)) {
             throw new Error('Counter named "' + name + '" does not exist, have you created it with <code>!counter.create ' + name + '</code>?');
         } else {
             return counters[name];
