@@ -9,6 +9,7 @@ var CounterTokens = CounterTokens || (function () {
   let updateStates = {}
   let updateTimers = {}
   let counterRemoveHandlers = {}
+  let callWithMutex = null
 
   const checkInstall = () => {
     log('-=> CounterTokens v' + version + ' <=-  [' + (new Date(lastUpdate * 1000)) + ']')
@@ -28,6 +29,7 @@ var CounterTokens = CounterTokens || (function () {
 
     persistentTokens = state.CounterTokens.tokens
     debug = state.CounterTokens.debug
+    callWithMutex = Mutex.create()
 
     if (debug) {
       log("Debugging enabled.  Disable with !counter-tokens.debug-off")
@@ -45,6 +47,11 @@ var CounterTokens = CounterTokens || (function () {
 
   const reset = () => {
     state.CounterTokens.tokens = {}
+    tokens = {}
+    debug = state.CounterTokens.debug = false
+    updateStates = {}
+    updateTimers = {}
+    counterRemoveHandlers = {}
     checkInstall()
   }
 
@@ -72,16 +79,16 @@ var CounterTokens = CounterTokens || (function () {
       counterName: counterName,
       imgSrc: getCleanImgSrc(imgSrc),
       pages: pageIds.reduce((acc, pageId) => {
-        acc[pageId] = { imgIds: [], startY: 0, lastY: 0 }
+        acc[pageId] = { imgIds: [], startY: 30, lastY: 30, startX: 30, lastX: 30 }
         return acc
       }, {}),
       top: 30,
       left: 30,
       width: 25,
       height: 25,
-      spaceX: 25,
-      spaceY: 25,
-      lastY: 30,
+      spaceX: 1,
+      spaceY: 1,
+      state: 'active'
     }
 
     attachTokenToCounterForAllPlayerPages(persistentTokens[tokenName])
@@ -145,8 +152,8 @@ var CounterTokens = CounterTokens || (function () {
     }
     const tokenName = persistentToken.tokenName
 
-    if (!('pages' in persistentToken)) {
-      token.pages = { imgIds: [], startY: 0, lastY: 0 }
+    if (!(pageId in persistentToken.pages)) {
+      persistentToken.pages = { imgIds: [], startY: persistentToken.top, lastY: persistentToken.top }
     }
 
     if (!(tokenName in tokens)) {
@@ -224,22 +231,41 @@ var CounterTokens = CounterTokens || (function () {
     })
   }
 
-  const onCounterRemove = function (tokenName, counterName) {
+  const onCounterRemove = (tokenName, counterName) => {
     if (tokenName != counterName) {
       return
+    }
+    if (debug) {
+      log("Counter removed: " + counterName)
+      log("Removing token: " + tokenName)
     }
     removeToken(tokenName)
   }
 
-  const removeToken = function (tokenName) {
-    if (!(tokenName in persistentTokens)) {
-      if (tokenName in tokens) {
+  const removeToken = (tokenName) => {
+    if (debug) {
+      log("Attempting to remove token: " + tokenName)
+    }
+
+    const persistentTokenFound = _.some(persistentTokens, (persistentToken) => persistentToken.tokenName === tokenName)
+    const tokenFound = _.some(tokens, (token) => token.tokenName === tokenName)
+
+    if (!persistentTokenFound) {
+      if (debug) {
+        log("Token not found in persistent tokens, can only attempt to delete in-memory token references.")
+      }
+      if (tokenFound) {
+        if (debug) {
+          log("Removing in-memory token references.")
+        }
         delete tokens[tokenName]
       }
       return
     }
 
-    Object.keys(persistentTokens[tokenName].pages).forEach((pageId) => {
+    persistentTokens[tokenName].state = 'removing'
+
+    _.each(persistentTokens[tokenName].pages, (pageToken, pageId) => {
       if (debug) {
         log("Removing token from page: " + pageId)
         log(pageToken)
@@ -247,20 +273,179 @@ var CounterTokens = CounterTokens || (function () {
       detachTokenFromCounter(persistentTokens[tokenName], pageId)
     })
 
-    delete tokens[tokenName]
+    if (tokenFound) {
+      delete tokens[tokenName]
+    }
+
     delete persistentTokens[tokenName]
   }
 
-  const removeCollisions = (tokenName, pageId, startY, lastY) => {
-    if (!(tokenName in persistentTokens)) {
-      throw new Error(tokenName + " is not attached to this game.")
+  const isInRange = (minX, maxX, minY, maxY, pageId, pageToken, tokenName) => {
+    const tokenStartX = pageToken.startX
+    const tokenLastX = pageToken.lastX
+    const tokenStartY = pageToken.startY
+    const tokenLastY = pageToken.lastY
+
+    if (debug) {
+      log("Checking token: " + tokenName + " on page: " + pageId + " with startY: " + tokenStartY + ", lastY: " + tokenLastY + ", startX: " + tokenStartX + ", lastX: " + tokenLastX)
+      log(pageToken)
+    }
+
+    const xCoordsConflict = (tokenStartX >= minX && tokenStartX <= maxX) || (tokenLastX >= minX && tokenLastX <= maxX)
+    const yCoordsConflict = (tokenStartY >= minY && tokenStartY <= maxY) || (tokenLastY >= minY && tokenLastY <= maxY)
+
+    if (yCoordsConflict && xCoordsConflict) {
+      if (debug) {
+        log("Token: " + tokenName + " on page: " + pageId + " is in range, moving.")
+        log("Minimum X range is: >" + minX + " and maximum range is: <" + maxX)
+        log("Minimum Y range is: >" + minY + " and maximum range is: <" + maxY)
+      }
+      return true
+    }
+
+    if (debug) {
+      log("Token: " + tokenName + " on page: " + pageId + " is not in range, skipping.")
+      log("Minimum X range is: >" + minX + " and maximum range is: <" + maxX)
+      log("Minimum Y range is: >" + minY + " and maximum range is: <" + maxY)
+    }
+    return false
+  }
+
+  const onImageRearrange = (tokenName, pageId, graphicRefs) => {
+    if (debug) {
+      log("Rearranging images for token: " + tokenName + " on page: " + pageId)
+      log("Graphic refs: ")
+      log(graphicRefs)
+    }
+    const { newStartX, newLastX, newStartY, newLastY } = getNewBoundingBox(
+      tokenName,
+      _.first(graphicRefs).get('left') || 0,
+      _.max(graphicRefs, graphicRef => graphicRef.get('left')).get('left') || 0,
+      _.first(graphicRefs).get('top') || 0,
+      _.last(graphicRefs).get('top') || 0,
+    )
+
+    const { oldStartX, oldLastX, oldStartY, oldLastY } = updateCoords(tokenName, pageId, newStartX, newLastX, newStartY, newLastY)
+    callWithMutex(() =>
+      removeCollisions(
+        tokenName,
+        pageId,
+        newStartX,
+        newLastX,
+        oldStartX,
+        oldLastX,
+        newStartY,
+        newLastY,
+        oldStartY,
+        oldLastY)
+    )
+  }
+
+  const getNewBoundingBox = (tokenName, graphicMinLeft, graphicMaxLeft, graphicMinTop, graphicMaxTop) => {
+    if (debug) {
+      log(`Getting new bounding box for token: ${tokenName} with graphicMinLeft ${graphicMinLeft}, graphicMaxLeft: ${graphicMaxLeft}, graphicMinTop: ${graphicMinTop} and graphicMaxTop: ${graphicMaxTop}`)
     }
     const token = persistentTokens[tokenName]
-    //   if (lastY != persistentTokens[tokenName].lastY) {
-    //     persistentTokens[tokenName].lastY = lastY
-    //   }
+    const halfHeight = Math.ceil(token.height / 2)
+    const halfWidth = Math.ceil(token.width / 2)
+    return {
+      newStartX: Math.floor(graphicMinLeft - halfWidth),
+      newLastX: Math.ceil(graphicMaxLeft + halfWidth),
+      newStartY: Math.floor(graphicMinTop - halfHeight),
+      newLastY: Math.ceil(graphicMaxTop + halfHeight)
+    }
+  }
 
-    // _.filter(tokens[tokenName], (token) => token.pageId === pageId)
+  const updateCoords = (tokenName, pageId, newStartX, newLastX, newStartY, newLastY) => {
+    if (!(tokenName in persistentTokens) || !(pageId in persistentTokens[tokenName].pages)) {
+      return [newStartY, newLastY]
+    }
+
+    if (debug) {
+      log("Updating start and last Y positions for token: " + tokenName + " on page: " + pageId + " to " + newStartY + " and " + newLastY + " respectively.")
+      log("Updating start and last X positions for token: " + tokenName + " on page: " + pageId + " to " + newStartX + " and " + newLastX + " respectively.")
+    }
+
+    const changedPageToken = persistentTokens[tokenName].pages[pageId]
+
+    const oldStartX = changedPageToken.startX
+    const oldLastX = changedPageToken.lastX
+    const oldStartY = changedPageToken.startY
+    const oldLastY = changedPageToken.lastY
+
+    changedPageToken.startX = newStartX
+    changedPageToken.lastX = newLastX
+    changedPageToken.startY = newStartY
+    changedPageToken.lastY = newLastY
+
+    return { oldStartX, oldLastX, oldStartY, oldLastY }
+  }
+
+  const removeCollisions = (tokenName, pageId, startX, lastX, oldStartX, oldLastX, startY, lastY, oldStartY, oldLastY) => {
+    if (!(tokenName in persistentTokens) || !(pageId in persistentTokens[tokenName].pages)) {
+      if (debug) {
+        log("Token not found in persistent tokens, skipping.")
+      }
+      return
+    }
+
+    if (debug) {
+      log("Removing any collisions with token: " + tokenName + " on page: " + pageId)
+    }
+
+    const changedPageToken = persistentTokens[tokenName].pages[pageId]
+
+    if (startY === oldStartY && lastY === oldLastY && startX === oldStartX && lastX === oldLastX) {
+      if (debug) {
+        log(`No change in startY or lastY (${startY} == ${changedPageToken.startY} && ${lastY} == ${changedPageToken.lastY}).`)
+        log(`No change in startX or lastX (${startX} == ${changedPageToken.startX} && ${lastX} == ${changedPageToken.lastX}).`)
+        log("Skipping.")
+      }
+      return
+    }
+
+    const collidingToken = _.chain(persistentTokens)
+      .filter((persistentToken) => persistentToken.tokenName !== tokenName)       // Don't check against self
+      .find((persistentToken) => {
+        if (debug) {
+          log("About to check the token for collision: " + persistentToken.tokenName)
+          log(persistentToken.pages)
+        }
+        const pageToken = _(persistentToken.pages || {})
+          .filter((_, pageTokenId) => pageTokenId === pageId)
+          .find((pageToken) => isInRange(startX, lastX, startY, lastY, pageId, pageToken, persistentToken.tokenName)) // Check if the token collides with
+        if (pageToken && debug) {
+          log("Token collides")
+          log(pageToken)
+        } else if (debug) {
+          log("Token does not collide")
+        }
+        return pageToken !== undefined
+      })
+      .value()
+
+    if (!collidingToken) {
+      if (debug) {
+        log("No colliding token found.")
+      }
+      return
+    }
+
+    const collidingTokenName = collidingToken?.tokenName
+    const collidingPageToken = collidingToken?.pages[pageId]
+    const changedToken = persistentTokens[collidingTokenName]
+
+    if (debug) {
+      log("Found colliding token: " + collidingTokenName)
+    }
+
+    changedPageToken.startY = collidingPageToken.lastY + Math.max(changedToken.height, collidingToken.height) + Math.max(collidingToken.spaceY, changedToken.spaceY)
+
+    if (tokens[tokenName]
+      && tokens[tokenName][pageId]
+      && 'onCollision' in tokens[tokenName][pageId]) {
+      tokens[tokenName][pageId].onCollision()
+    }
   }
 
   const enableDebug = () => {
@@ -286,6 +471,16 @@ var CounterTokens = CounterTokens || (function () {
       + "<p><code>!counter-tokens.add &lt;name&gt; &lt;counterName&gt; &lt;imgSrc&gt;</code></p>"
       + "<p>Instead of supplying an image source, you can specify a named graphic on the page. The graphic will be removed and replaced with the tokens.</p>"
       + "<p><code>!counter-tokens.add-by-name &lt;name&gt; &lt;counterName&gt; &lt;tokenName&gt;</code></p>"
+      + "<h4>Remove a Counter Token</h4>"
+      + "<p><code>!counter-tokens.remove &lt;name&gt;</code></p>"
+      + "<h4>List all Counter Tokens</h4>"
+      + "<p><code>!counter-tokens.list</code></p>"
+      + "<h4>Reset all Counter Tokens</h4>"
+      + "<p><code>!counter-tokens.total-reset</code></p>"
+      + "<h4>Debugging</h4>"
+      + "<p>Debugging is disabled by default.  Enable with <code>!counter-tokens.debug-on</code> and disable with <code>!counter-tokens.debug-off</code></p>"
+      + "<p>When debugging is enabled, the script will log additional information to the API console.</p>"
+      + "<p>To dump the current state of the script to the API console, use <code>!counter-tokens.debug</code></p>"
   }
 
   const handleInput = (msg) => {
@@ -472,7 +667,7 @@ var CounterTokens = CounterTokens || (function () {
         if (debug) {
           log("No graphics before, returning current left and top: " + currentLeft + ", " + currentTop)
         }
-        return [currentLeft, currentTop]
+        return [Math.max(10, currentLeft), Math.max(10, currentTop)]
       }
 
       const rowsOfTen = Math.floor(graphicRefsBefore.length / 10)
@@ -500,9 +695,12 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     //10 items per row when > 10 items, 5 items per row when <= 10 items and > 5 items, all items when <= 5 items
-    const getNewLeftAndTop = (numOnRow, remainingItems, startLeft, currentLeft, currentTop, spaceRight, spaceBottom) =>
-      (numOnRow >= 10 || numOnRow >= 5 && numOnRow + remainingItems < 10) ?
+    //Don't allow items to be placed off the left or top of the page
+    const getNewLeftAndTop = (numOnRow, remainingItems, startLeft, currentLeft, currentTop, spaceRight, spaceBottom) => {
+      const [left, top] = (numOnRow >= 10 || numOnRow >= 5 && numOnRow + remainingItems < 10) ?
         [startLeft, currentTop + spaceBottom] : [currentLeft + spaceRight, currentTop]
+      return [Math.max(10, left), Math.max(10, top)]
+    }
 
     const debounce = (key, func, wait) => {
       const timeout = updateTimers[key]
@@ -518,8 +716,38 @@ var CounterTokens = CounterTokens || (function () {
       }, wait)
     }
 
+    const imageArranger = (graphicRefs, startLeft, startTop, spaceRight, spaceBottom) =>
+      _.reduce(graphicRefs, (acc, g) => {
+        if (acc.remainingItems === 0) {
+          return acc
+        }
+
+        if (debug) {
+          log("Acc: ")
+          log(acc)
+          log("Graphic: ")
+          log(g)
+        }
+
+        const [left, top] = acc.numOnRow > 0 ? getNewLeftAndTop(acc.numOnRow, acc.remainingItems, startLeft, acc.left, acc.top, spaceRight, spaceBottom) : [acc.left, acc.top];
+
+        if (debug) {
+          log("Moving image to left: " + left + ", top: " + top)
+        }
+
+        g.set('left', left || 0)
+        g.set('top', top || 0)
+
+        return {
+          left,
+          top,
+          remainingItems: (acc.remainingItems - 1),
+          numOnRow: (left === startLeft ? 1 : acc.numOnRow + 1),
+        }
+      }, { left: startLeft, top: startTop, remainingItems: graphicRefs.length, numOnRow: 0 })
+
     const rearrangeImages = (graphicRefs, startLeft, startTop, token) => {
-      const [spaceRight, spaceBottom] = [token.spaceX, token.spaceY]
+      const [spaceRight, spaceBottom] = [token.spaceX + token.width, token.spaceY + token.height]
 
       if (debug) {
         log("Rearranging images")
@@ -553,37 +781,11 @@ var CounterTokens = CounterTokens || (function () {
         log(graphicRefs)
       }
 
-      const finalLocation = _.reduce(graphicRefs, (acc, g) => {
-        if (acc.remainingItems === 0) {
-          return acc
-        }
+      imageArranger(graphicRefs, startLeft, startTop, spaceRight, spaceBottom)
 
-        if (debug) {
-          log("Acc: ")
-          log(acc)
-          log("Graphic: ")
-          log(g)
-        }
-
-        const [left, top] = acc.numOnRow > 0 ? getNewLeftAndTop(acc.numOnRow, acc.remainingItems, startLeft, acc.left, acc.top, spaceRight, spaceBottom) : [acc.left, acc.top];
-
-        if (debug) {
-          log("Moving image to left: " + left + ", top: " + top)
-        }
-
-        g.set('left', left)
-        g.set('top', top)
-
-        return {
-          left,
-          top,
-          remainingItems: (acc.remainingItems - 1),
-          numOnRow: (left === startLeft ? 1 : acc.numOnRow + 1),
-        }
-      }, { left: startLeft, top: startTop, remainingItems: graphicRefs.length, numOnRow: 0 })
       updateStates[graphicRefsId] = false
       const pageId = graphicRefs[0].get('pageid')
-      removeCollisions(token.tokenName, pageId, startTop, finalLocation.top)
+      onImageRearrange(token.tokenName, pageId, graphicRefs)
     }
 
     const normalizeObjKeys = (obj) => {
@@ -596,23 +798,68 @@ var CounterTokens = CounterTokens || (function () {
       }, {})
     }
 
-    const undoDeleteIfGraphicShouldExist = (graphicRefs, token, obj) => {
+    const undoDeleteIfGraphicShouldExist = (graphicRefs, token, pageId, obj) => {
+      if (token.state === 'removing') {
+        return
+      }
+
+      if (debug) {
+        log("Undoing delete of graphic should exist for token: " + token.tokenName + " on page: " + pageId)
+        log(obj)
+      }
+
       const objName = obj.get('name')
 
       if (!tokenNameMatches(token.tokenName, objName)) {
+        log(`Graphic name ${objName} doesn't match token ${token.tokenName}, skipping.`)
         return
       }
 
       const objId = obj.get('id')
+      const tokenImgIdId = _.indexOf(token.pages[pageId].imgIds, objId)
       const graphicRefId = findGraphicRefIndexByImgId(graphicRefs, objId)
 
-      if (graphicRefId > -1) {
-        const img = createObj('graphic', normalizeObjKeys(obj.attributes)),
-          tokenImgIdId = _.indexOf(token.imgIds, objId)
-        graphicRefs.splice(graphicRefId, 1, img)
-        token.imgIds.splice(tokenImgIdId, 1, img.get('id'))
-        toFront(img)
+      if (debug) {
+        log("Found graphic ref id: " + graphicRefId + " for token: " + token.tokenName + " on page: " + pageId)
+        log("Found token image id: " + tokenImgIdId + " for token: " + token.tokenName + " on page: " + pageId)
       }
+
+      if (graphicRefId < 0 || tokenImgIdId < 0) {
+        if (debug) {
+          log("Graphic should be deleted, not recreating it.")
+        }
+
+        return
+      }
+
+      if (debug) {
+        log("Graphic should exist, recreating it.")
+      }
+
+      const img = createObj('graphic', normalizeObjKeys(obj.attributes))
+      graphicRefs.splice(graphicRefId, 1, img)
+      token.pages[pageId].imgIds.splice(tokenImgIdId, 1, img.get('id'))
+      toFront(img)
+    }
+
+    const resizeImage = (token, obj) => {
+      if (debug) {
+        log("Resizing event detected for graphic")
+        log(obj)
+      }
+
+      if (!tokenNameMatches(token.tokenName, obj.get('name'))) {
+        if (debug) {
+          log("Graphic name doesn't match token, skipping.")
+        }
+        return
+      }
+
+      if (debug) {
+        log("Resizing image to width: " + token.width + ", height: " + token.height)
+      }
+      obj.set('width', token.width)
+      obj.set('height', token.height)
     }
 
     const keepImagesTogether = (graphicRefs, token, obj, prev) => {
@@ -636,9 +883,13 @@ var CounterTokens = CounterTokens || (function () {
         log(obj)
         log("Previous: ")
         log(prev)
-      }      
+      }
 
-      const [left, top] = findStartLeftAndTop(graphicRefs, obj, token.spaceX, token.spaceY)
+      const [left, top] = findStartLeftAndTop(graphicRefs, obj, token.spaceX + token.width, token.spaceY + token.height)
+
+      if (debug) {
+        log("Found start left and top: " + left + ", " + top)
+      }
 
       rearrangeImages(graphicRefs, left, top, token)
     }
@@ -692,15 +943,15 @@ var CounterTokens = CounterTokens || (function () {
         }
 
         const left = token.left
-        const top = token.top
+        const top = token.pages[pageId].startY
 
         const img = existingImage || createObj('graphic', {
           name: token.tokenName + ' ' + i,
           pageid: pageId,
           layer: 'map',
           imgsrc: token.imgSrc,
-          top: top,
           left: left,
+          top: top,
           width: token.width,
           height: token.height,
           isdrawing: true
@@ -738,6 +989,10 @@ var CounterTokens = CounterTokens || (function () {
           log("Adding " + (counterValue - graphicCount) + " images to token: " + token.tokenName)
         }
         addTokenImages(graphicRefs, token, pageId, counterValue - token.pages[pageId].imgIds.length)
+      } else {
+        if (debug) {
+          log("No change in number of images for token: " + token.tokenName)
+        }
       }
       if (graphicRefs.length <= 0) {
         return
@@ -746,19 +1001,39 @@ var CounterTokens = CounterTokens || (function () {
     }
 
     //Bind each reference of on-page graphical objects to the supplied variable
-    const getExistingGraphicReferences = (token, pageId) => {
+    const getExistingGraphicReferences = (persistentToken, pageId) => {
+
+      const tokenPageImageIds = persistentToken.pages[pageId].imgIds
+
       const graphics = findObjs({
         _type: 'graphic',
         _pageid: pageId
-      }).filter(o => _.contains(token.pages[pageId].imgIds, o.get('id')))
+      }).filter(o => _.contains(tokenPageImageIds, o.get('id')))
 
-      //Remove all imgIds from token for images that that haven't been found on the page.
-      _.each(
-        _.difference(token.pages[pageId].imgIds, _.map(graphics, (g) => g.get('id'))),
-        (imgId) => token.pages[pageId].imgIds.splice(_.indexOf(token.pages[pageId].imgIds, imgId))
+      //Remove all imgIds from persistentToken for images that that haven't been found on the page.
+      const idsToRemove = _.difference(
+        tokenPageImageIds,
+        _.map(graphics, (g) => g.get('id'))
       )
 
+      _.each(idsToRemove, (imgId) => tokenPageImageIds.splice(
+        _.indexOf(tokenPageImageIds, imgId)
+      ))
+
       return graphics
+    }
+
+    const resetYPosition = (graphicRefs, token, pageId) => {
+      const left = graphicRefs[0].get('left')
+      const pageToken = token.pages[pageId]
+      const top = pageToken.startY
+
+      if (debug) {
+        log("Resetting position for token: " + token.tokenName + " on page: " + pageId)
+        log("Resetting position to left: " + left + ", top: " + top)
+      }
+
+      rearrangeImages(graphicRefs, left, top, token)
     }
 
     const onCounterChange = (graphicRefs, token, pageId, counterName, counter) => {
@@ -766,22 +1041,27 @@ var CounterTokens = CounterTokens || (function () {
         return
       }
       if (debug) {
-        log("Counter changed for token: " + token.tokenName + " on page: " + pageId + " to value: " + counter.current + "from value: " + counter.prev)
+        log("Counter changed for token: " + token.tokenName + " on page: " + pageId + " to value: " + counter.current)
       }
 
       try {
-        const lastY = updateImages(graphicRefs, token, pageId, counter.current)
-        token.lastY = lastY
+        updateImages(graphicRefs, token, pageId, counter.current)
       } catch (err) {
-        logToChat('gm', "Unable to update Counter Token images: " + err.message)
+        logToChat('gm', `Unable to update Counter Token images for token: ${token.tokenName}, pageId: ${pageId}, error: ${err.message}`)
       }
     }
 
     const clearImages = (graphicRefs, tokenName, pageId) => {
-      _.each(graphicRefs, function (obj) {
+      if (debug) {
+        log("Clearing images for token: " + tokenName + " on page: " + pageId)
+      }
+      _.each(graphicRefs, (obj) => {
+        if (debug) {
+          log("Removing image: ")
+          log(obj)
+        }
         obj.remove()
       })
-      removeCollisions(tokenName, pageId, 0, 0)
     }
 
     const create = (token, pageId) => {
@@ -790,27 +1070,41 @@ var CounterTokens = CounterTokens || (function () {
         log(token)
       }
 
-      if (!(pageId in token.pages) || !_.isArray(token.pages[pageId])) {
-        token.pages[pageId] = { imgIds: [], startY: 0, lastY: 0 }
+      if (!(pageId in token.pages) || !token.pages[pageId]) {
+        token.pages[pageId] = {
+          imgIds: [],
+          startY: token.top,
+          lastY: token.top,
+          startX: token.left,
+          lastX: token.left
+        }
       }
 
       //Get all graphical objects on the page that match the token name
       const graphicRefs = getExistingGraphicReferences(token, pageId)
 
-      const graphicsChangeHandler = _.partial(keepImagesTogether, graphicRefs, token)
+      const graphicsMoveHandler = _.partial(keepImagesTogether, graphicRefs, token)
       const counterChangeHandler = _.partial(onCounterChange, graphicRefs, token, pageId)
       const clearImageHandler = _.partial(clearImages, graphicRefs, token.tokenName, pageId)
+      const onCollision = _.partial(resetYPosition, graphicRefs, token, pageId)
+      const resizeImageHandler = _.partial(resizeImage, token)
+      const deleteHandler = _.partial(undoDeleteIfGraphicShouldExist, graphicRefs, token, pageId)
 
-      on('change:graphic', graphicsChangeHandler)
+      on('destroy:graphic', (obj) => { callWithMutex(() => deleteHandler(obj)) })
+      on('change:graphic:left', (obj, prev) => { callWithMutex(() => graphicsMoveHandler(obj, prev)) })
+      on('change:graphic:top', (obj, prev) => { callWithMutex(() => graphicsMoveHandler(obj, prev)) })
+      on('change:graphic:width', (obj) => { callWithMutex(() => resizeImageHandler(obj)) })
+      on('change:graphic:height', (obj) => { callWithMutex(() => resizeImageHandler(obj)) })
 
       return {
+        onCollision: onCollision,
         onCounterChange: counterChangeHandler,
         onClearImages: clearImageHandler
       }
     }
 
     return {
-      create: create
+      create: create,
     }
   }())
 
@@ -842,4 +1136,13 @@ on('ready', function () {
       throw new Error("Unable to find state.PageWatcher.ObservePageAddPlayer, have you installed PageWatcher?")
     }
   }, 200)
+
+  const mutexIntId = setInterval(() => {
+    if (undefined !== Mutex) {
+      clearInterval(mutexIntId)
+    } else if (tries++ > 20) {
+      clearInterval(mutexIntId)
+      throw new Error("Unable to find state.Mutex, have you installed Mutex?")
+    }
+  })
 })

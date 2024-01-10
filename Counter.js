@@ -231,7 +231,7 @@ var Counter = Counter || (function () {
         }
         observers.counterChange.push(handler);
         _.each(counters, function (counter, counterName) {
-            notifyCounterChange(counterName);
+            handler(counterName, counter);
         });
     },
 
