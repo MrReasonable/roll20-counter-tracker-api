@@ -68,7 +68,8 @@ var SharedVitalityManager =
           (a) =>
             a.get('current') !== '' &&
             _.has(crucibleVitalityCounters, a.get('current')) &&
-            getAttrByName(a.get('_characterid'), 'shared_vitality')
+            parseInt(getAttrByName(a.get('_characterid'), 'shared_vitality')) === 1 &&
+            parseInt(getAttrByName(a.get('_characterid'), 'incorporeal')) === 1
         )
         .reduce((acc, attr) => {
           const name = attr.get('current')
@@ -78,6 +79,7 @@ var SharedVitalityManager =
             [charId]: name,
           }
         }, {})
+      log(charactersToObserve)
 
       crucibles = _.chain(charactersToObserve)
         .keys()
@@ -92,6 +94,7 @@ var SharedVitalityManager =
           }
         }, {})
         .value()
+      log(crucibles)
     }
 
     const addCrucibleToTrack = (crucible, vitalityCounterName) => {
@@ -285,9 +288,10 @@ var SharedVitalityManager =
     const handleAttributeChange = (obj) => {
       const name = obj.get('name')
       const charId = obj.get('_characterid')
-      if (['crucible', 'shared_vitality'].includes(name)) {
+      const existingCrucible = charactersToObserve[charId]
+      if (['crucible', 'shared_vitality', 'incorporeal'].includes(name)) {
         registerCrucibles()
-        const crucible = charactersToObserve[charId]
+        const crucible = existingCrucible || charactersToObserve[charId]
         if (crucible) {
           updateVitalityCounterMax(
             crucible,
@@ -295,9 +299,9 @@ var SharedVitalityManager =
           )
         }
       }
-      const crucible = charactersToObserve[charId]
+      const crucible = existingCrucible || charactersToObserve[charId]
       if (
-        ['crucible', 'shared_vitality', 'current_vitality'].includes(name) &&
+        ['crucible', 'shared_vitality', 'incorporeal', 'current_vitality'].includes(name) &&
         crucible
       ) {
         updateVitalityCounter(crucible, calculateTotalVitality(crucible))
