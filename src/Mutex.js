@@ -1,3 +1,4 @@
+// eslint-disable-next-line no-unused-vars
 const Mutex = (function () {
   const create = () => {
     let busy = false
@@ -29,4 +30,4 @@ const Mutex = (function () {
   }
 
   return { create }
-}())
+})()

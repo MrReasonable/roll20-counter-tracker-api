@@ -1,0 +1,27 @@
+{
+  "env": {
+    "browser": false,
+    "es2021": true,
+    "node": true
+  },
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": 12,
+    "sourceType": "module"
+  },
+  "globals": {
+    "_": "readonly",
+    "on": "readonly",
+    "Campaign": "readonly",
+    "log": "readonly",
+    "CounterTokens": "writable",
+    "Counter": "writable",
+    "state": "writable",
+    "PageWatcher": "writable",
+    "sendChat": "readonly",
+    "createObj": "readonly",
+    "toFront": "readonly",
+    "Mutex": "writable",
+    "findObjs": "readonly"
+  }
+}
